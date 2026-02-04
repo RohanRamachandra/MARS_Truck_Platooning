@@ -1,6 +1,4 @@
 # Java build artifacts
-/bin/
-*.class
 
 # Eclipse / IDE files
 .settings/
