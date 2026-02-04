@@ -3,8 +3,6 @@
 *.class
 
 # Eclipse / IDE files
-*.classpath
-*.project
 .settings/
 
 # macOS
