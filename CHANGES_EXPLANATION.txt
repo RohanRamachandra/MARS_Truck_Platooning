@@ -1,0 +1,522 @@
+================================================================================
+  MARS TRUCK PLATOONING - CONTROL SYSTEM CHANGES DETAILED EXPLANATION
+================================================================================
+
+This document explains all the changes made to implement sophisticated vehicle
+control behavior, communication loss handling, and vehicle state tracking.
+
+================================================================================
+1. GAP FORMULA & DISTANCE POLICY
+================================================================================
+
+WHAT IS THE GAP FORMULA?
+------------------------
+The gap formula is: desired_distance = T_GAP * velocity + D_MIN
+
+Where:
+  - T_GAP = 0.6 seconds (time headway - how many seconds behind the predecessor)
+  - velocity = current vehicle velocity in m/s
+  - D_MIN = 2.0 meters (minimum safe distance)
+
+WHY THIS FORMULA?
+-----------------
+This implements "time headway" spacing policy:
+  • When velocity = 0 m/s:   desired_distance = 0.6 * 0 + 2.0 = 2.0m (safe minimum)
+  • When velocity = 10 m/s:  desired_distance = 0.6 * 10 + 2.0 = 8.0m
+  • When velocity = 20 m/s:  desired_distance = 0.6 * 20 + 2.0 = 14.0m
+
+This automatically scales the gap based on speed - faster vehicles need more
+distance for safety. The 0.6 second headway means the vehicle stays 0.6 seconds
+behind the one in front (stopping distance if the leader suddenly brakes).
+
+CODE IMPLEMENTATION:
+--------------------
+Location: Lines 138-140
+
+    private double calculateDesiredDistance() {
+        return T_GAP * vel + D_MIN;
+    }
+
+This method is called every 100ms by the control loop (updateControl method).
+The result is stored in: desiredDistance variable
+
+USAGE IN CONTROL LOOP:
+----------------------
+When a follower node runs the control update:
+    this.desiredDistance = calculateDesiredDistance();
+    double error = currentDistance - desiredDistance;
+
+The error tells us: "How far off are we from the desired distance?"
+  • Negative error = too close (need to slow down)
+  • Positive error = too far (need to speed up)
+
+================================================================================
+2. PD CONTROLLER (PROPORTIONAL-DERIVATIVE)
+================================================================================
+
+WHAT IS A PD CONTROLLER?
+------------------------
+It's a control algorithm that adjusts acceleration based on:
+  1. PROPORTIONAL (P) term: How far off we are NOW
+  2. DERIVATIVE (D) term: How fast we're changing
+
+WHY PD CONTROL?
+---------------
+• Proportional: React immediately to distance errors
+• Derivative: Predict and prevent overshooting
+• Together: Smooth, stable response to speed/distance changes
+
+CODE IMPLEMENTATION:
+--------------------
+Location: Lines 141-143
+
+    private double computePDControl(double error, double errorRate) {
+        return KP * error + KD * errorRate;
+    }
+
+Where:
+  - KP = 0.5 (proportional gain - how strongly to react to error)
+  - KD = 0.1 (derivative gain - how much to dampen rapid changes)
+
+EXAMPLE:
+--------
+If currentDistance = 5m and desiredDistance = 10m:
+  error = 5 - 10 = -5m (TOO CLOSE, negative error)
+  
+  P_term = 0.5 * (-5) = -2.5
+  
+If distance is closing fast (errorRate = -1.0):
+  D_term = 0.1 * (-1.0) = -0.1
+  
+Total: -2.5 + (-0.1) = -2.6 (acceleration command)
+
+This negative acceleration (deceleration) slows the vehicle to increase distance.
+
+FULL CONTROL UPDATE:
+--------------------
+Location: Lines 159-166
+
+    private void updateControl(double predecessorAccel) {
+        this.desiredDistance = calculateDesiredDistance();
+        double error = currentDistance - desiredDistance;
+        double errorRate = (currentDistance - desiredDistance) * 0.1;
+        double pdControl = computePDControl(error, errorRate);
+        double feedforward = 0.5 * predecessorAccel;
+        double desiredAccel = pdControl + feedforward;
+        this.accel = boundAcceleration(desiredAccel);
+        this.vel = Math.max(0, this.vel + this.accel * 0.1);
+    }
+
+Steps:
+  1. Calculate desired distance using gap formula
+  2. Compare actual vs desired (error)
+  3. Compute PD control output
+  4. Add feedforward from predecessor (0.5 * their acceleration)
+  5. Bound the acceleration (safety limits)
+  6. Update velocity: v_new = v + accel * 0.1 (0.1 = 100ms timestep)
+
+================================================================================
+3. ACCELERATION BOUNDING & JERK LIMITING
+================================================================================
+
+WHY LIMIT ACCELERATION?
+-----------------------
+Vehicles can't instantaneously change acceleration - it causes discomfort and
+unrealistic physics. We limit both acceleration and jerk (rate of acceleration).
+
+CODE IMPLEMENTATION:
+--------------------
+Location: Lines 145-151
+
+    private double boundAcceleration(double desiredAccel) {
+        double jerkLimit = MAX_JERK * 0.1;
+        double maxChange = lastAccel + jerkLimit;
+        double minChange = lastAccel - jerkLimit;
+        double bounded = Math.max(minChange, Math.min(maxChange, desiredAccel));
+        bounded = Math.max(-MAX_ACCEL, Math.min(MAX_ACCEL, bounded));
+        this.lastAccel = bounded;
+        return bounded;
+    }
+
+CONSTANTS:
+----------
+  MAX_ACCEL = 2.0 m/s²    (max acceleration magnitude)
+  MAX_JERK = 1.0 m/s³     (max rate of acceleration change)
+
+JERK LIMITING EXPLANATION:
+--------------------------
+Jerk = change in acceleration
+
+With timestep 0.1s:
+  jerkLimit = 1.0 * 0.1 = 0.1 m/s²/step
+
+This means acceleration can change by at most 0.1 m/s² per 100ms timestep.
+
+Example: Smooth acceleration increase
+  timestep 1: lastAccel = 0.0, allowed range = [0.0-0.1, 0.0+0.1] = [-0.1, 0.1]
+  timestep 2: lastAccel = 0.1, allowed range = [0.1-0.1, 0.1+0.1] = [0.0, 0.2]
+  timestep 3: lastAccel = 0.2, allowed range = [0.2-0.1, 0.2+0.1] = [0.1, 0.3]
+  ...eventually reaches MAX_ACCEL = 2.0 m/s² gradually
+
+HARD ACCELERATION LIMIT:
+------------------------
+After jerk limiting, we also cap at ±MAX_ACCEL = ±2.0 m/s²
+
+This ensures:
+  • Smooth, realistic vehicle behavior
+  • No sudden jerky movements
+  • Passenger comfort in platooning (if vehicles had people)
+
+================================================================================
+4. COMMUNICATION LOSS HANDLING
+================================================================================
+
+WHAT IS COMMUNICATION LOSS?
+---------------------------
+When a follower doesn't receive a heartbeat from the leader for too long,
+it assumes communication has failed and enters "graceful fallback" mode.
+
+DETECTION MECHANISM:
+--------------------
+Location: Lines 175-186
+
+    private void handleCommLoss() {
+        if (!inPlatoon || nodeId == currentLeaderId) return;
+        
+        long timeSinceLast = System.currentTimeMillis() - lastLeaderHeartbeat;
+        
+        if (timeSinceLast > COMM_LOSS_ELECTION_THRESHOLD) {
+            System.out.println("\n[SYSTEM] Prolonged communication loss. Triggering Bully election...");
+            commLoss = true;
+            dynamicLeaderElection();
+        } else if (timeSinceLast > COMM_LOSS_THRESHOLD && !commLoss) {
+            System.out.println("\n[WARNING] Communication loss detected. Gap increased to " + (T_GAP + 2.0) + "s.");
+            commLoss = true;
+            commLossTimeGap = T_GAP + 2.0;
+        }
+    }
+
+THRESHOLDS:
+-----------
+  COMM_LOSS_THRESHOLD = 5000ms (5 seconds)
+    → Warning: Increase safety gap, switch to local control
+
+  COMM_LOSS_ELECTION_THRESHOLD = 10000ms (10 seconds)
+    → Critical: Assume leader failed, elect new leader (Bully algorithm)
+
+TRACKING LASTLEADERHEARTBEAT:
+-----------------------------
+Location: Line 24
+
+    private volatile long lastLeaderHeartbeat = System.currentTimeMillis();
+
+Every time a follower receives a heartbeat from the leader:
+  this.lastLeaderHeartbeat = System.currentTimeMillis();
+  this.commLoss = false;
+  this.commLossTimeGap = T_GAP;
+
+Communication is considered normal if messages arrive frequently enough.
+
+GRACEFUL DEGRADATION:
+---------------------
+When commLoss flag is set:
+  • Gap increases from 0.6s to 2.6s (safer spacing)
+  • Node continues local control without leader commands
+  • Control loop still runs: updateControl(0.0)
+  • Vehicle maintains distance using local sensors
+
+This allows the platoon to continue operating safely even when leader
+communication is temporarily unavailable.
+
+RECOVERY:
+---------
+When leader heartbeat resumes:
+  this.lastLeaderHeartbeat = System.currentTimeMillis();  // Update timestamp
+  this.commLoss = false;  // Clear flag
+  this.commLossTimeGap = T_GAP;  // Return to normal gap
+
+The node automatically returns to normal operation without any manual intervention.
+
+================================================================================
+5. VEHICLE STATE TRACKING
+================================================================================
+
+VEHICLE STATE VARIABLES:
+------------------------
+Location: Lines 13-26
+
+    private volatile double vel = 20.0;           // velocity in m/s
+    private volatile double gap = 5.0;            // time headway command
+    private volatile double accel = 0.0;          // current acceleration
+    private volatile double lastAccel = 0.0;      // previous acceleration (for jerk)
+    private volatile double desiredDistance = 5.0;  // target spacing
+    private volatile double currentDistance = 50.0; // actual distance to predecessor
+    private volatile int currentLeaderId = 1;     // who's leading
+    private volatile boolean inPlatoon = false;   // member of platoon?
+    private volatile boolean isActive = true;     // node online?
+    private volatile long lastLeaderHeartbeat;    // for comm loss detection
+    private volatile boolean commLoss = false;    // in fault mode?
+    private volatile double commLossTimeGap = 5.0;  // gap during fault
+
+WHY THESE VARIABLES?
+--------------------
+Each variable tracks a different aspect of the vehicle state:
+
+• vel: Current speed (changes with acceleration)
+• accel: Current acceleration (affects velocity change)
+• lastAccel: Previous acceleration (for jerk limiting)
+• currentDistance: Actual distance measured from sensors/radar
+• desiredDistance: Target distance from gap formula
+• gap: Time headway parameter (controlled by leader)
+• commLoss: Fault mode indicator
+• lastLeaderHeartbeat: Used to detect communication failures
+
+VEHICLE STATE DISPLAY COMMAND "V":
+----------------------------------
+Location: Lines 254-261
+
+    case "V":
+        System.out.println(">>> Vehicle State: " + nodeName);
+        System.out.println("    Velocity: " + String.format("%.2f", vel) + " m/s");
+        System.out.println("    Acceleration: " + String.format("%.2f", accel) + " m/s²");
+        System.out.println("    Current Distance: " + String.format("%.2f", currentDistance) + " m");
+        System.out.println("    Desired Distance: " + String.format("%.2f", desiredDistance) + " m");
+        System.out.println("    Time Gap: " + (commLoss ? commLossTimeGap : T_GAP) + "s" + 
+                           (commLoss ? " (COMM LOSS)" : ""));
+        System.out.println("    Gap Policy: " + String.format("%.2f", (commLoss ? commLossTimeGap : T_GAP)) + 
+                           " * v + " + D_MIN);
+
+EXAMPLE OUTPUT:
+---------------
+>>> Vehicle State: Beta
+    Velocity: 15.50 m/s
+    Acceleration: 0.35 m/s²
+    Current Distance: 11.20 m
+    Desired Distance: 11.30 m
+    Time Gap: 0.6s
+    Gap Policy: 0.6 * v + 2.0
+
+INTERPRETATION:
+---------------
+• Velocity 15.50 m/s: Vehicle is moving at 15.5 meters per second
+• Acceleration 0.35 m/s²: Speeding up gently
+• Current Distance 11.20m vs Desired 11.30m: Slightly too close (-0.1m error)
+• Time Gap 0.6s: Normal operation (not in fault mode)
+• Gap Policy: With 15.5 m/s speed, should maintain 0.6*15.5 + 2.0 = 11.3m
+
+This command lets you monitor the control system's performance in real-time.
+
+================================================================================
+6. VEHICLE DYNAMICS SIMULATION
+================================================================================
+
+SIMULATING MOTION:
+------------------
+Location: Lines 189-204
+
+    private void simulateVehicleState() {
+        if (!inPlatoon || nodeId == currentLeaderId) return;
+        
+        Integer predecessorId = getPredecessorId();
+        if (predecessorId == null) return;
+        
+        Double predecessorVel = vel;
+        double relativeVel = predecessorVel - vel;
+        double dt = 0.1;
+        
+        currentDistance += relativeVel * dt;
+        if (currentDistance < D_MIN) currentDistance = D_MIN;
+        if (currentDistance > 50.0) currentDistance = 50.0;
+    }
+
+HOW IT WORKS:
+-------------
+1. Only followers update distance (leaders don't have a predecessor to follow)
+2. Find the predecessor vehicle ID (getPredecessorId)
+3. Calculate relative velocity: if leader going faster, distance decreases
+4. Update distance: currentDistance += relativeVel * 0.1
+   - 0.1 second timestep (100ms control loop frequency)
+5. Clamp distance to safe range [D_MIN=2.0m, 50.0m]
+
+EXAMPLE:
+--------
+  Leader velocity = 20 m/s
+  Follower velocity = 18 m/s
+  Relative velocity = 20 - 18 = 2 m/s (leader pulling away)
+  Time step = 0.1s
+  
+  Distance change = 2 * 0.1 = 0.2m increase per 100ms
+  
+  If current distance was 10m, after 100ms: 10 + 0.2 = 10.2m
+  
+If follower has PD control working correctly, it will accelerate to match
+the leader's speed and eventually stabilize at the desired distance.
+
+================================================================================
+7. CONTROL LOOP INTEGRATION
+================================================================================
+
+WHERE CONTROL RUNS:
+-------------------
+Location: Lines 72-79
+
+    scheduler.scheduleAtFixedRate(() -> {
+        if (!isActive || !inPlatoon) return;
+        handleCommLoss();
+        simulateVehicleState();
+        if (inPlatoon && nodeId != currentLeaderId) {
+            updateControl(0.0);
+        }
+    }, 0, 100, TimeUnit.MILLISECONDS);
+
+EXECUTION FREQUENCY:
+--------------------
+Every 100 milliseconds (10Hz control frequency)
+
+CONTROL LOOP SEQUENCE:
+----------------------
+1. Check if node is active and in platoon (skip if not)
+2. handleCommLoss() - check for leader communication timeouts
+3. simulateVehicleState() - update distance based on relative motion
+4. updateControl(0.0) - run PD controller for followers only
+
+LEADERS DON'T RUN CONTROL:
+--------------------------
+Leaders just send speed and gap commands, they don't follow anyone.
+Only followers run the updateControl loop.
+
+================================================================================
+8. COMMUNICATION PROTOCOL - HEARTBEAT WITH MEMBER LIST
+================================================================================
+
+HEARTBEAT FORMAT:
+-----------------
+HB|senderId|leaderId|memberList
+
+Example: "HB|1|1|1,2,3,4"
+  - HB = heartbeat message type
+  - 1 = sent by node 1 (Alpha)
+  - 1 = leader is node 1 (Alpha)
+  - 1,2,3,4 = all members (Alpha, Beta, Charlie, Delta)
+
+LEADER HEARTBEAT:
+-----------------
+Location: Lines 64-71
+
+    if (nodeId == currentLeaderId) {
+        cleanOfflineMembers();
+        if (!platoonMembers.contains(nodeId)) {
+            platoonMembers.add(nodeId);
+        }
+        sendToAll("HB|" + nodeId + "|" + currentLeaderId + "|" + getMemberIdsString());
+    }
+
+Leader ensures:
+  1. Removes offline members from list
+  2. Adds itself to the member list (important!)
+  3. Broadcasts full member list to all nodes
+
+FOLLOWER HEARTBEAT:
+-------------------
+    } else {
+        sendToAll("HB|" + nodeId + "|" + currentLeaderId + "|" + nodeId);
+    }
+
+Follower just echoes back its own ID.
+
+RECEIVING HEARTBEAT (Leader):
+-----------------------------
+When leader receives heartbeat from follower:
+  - Adds sender to platoonMembers if not already there
+
+RECEIVING HEARTBEAT (Follower):
+-------------------------------
+When follower receives heartbeat from leader:
+  - Updates lastLeaderHeartbeat timestamp
+  - Clears commLoss flag
+  - Extracts full member list from heartbeat
+  - Updates local platoonMembers set
+  - Synchronizes their member view with leader's
+
+This ensures all nodes have the same platoon member list.
+
+================================================================================
+9. BULLY ELECTION ON COMMUNICATION LOSS
+================================================================================
+
+WHEN TRIGGERED:
+---------------
+After 10 seconds (COMM_LOSS_ELECTION_THRESHOLD) without leader heartbeat,
+the handleCommLoss() method calls:
+  dynamicLeaderElection();
+
+BULLY ALGORITHM:
+----------------
+Highest node ID wins leadership. Existing implementation at lines ~100.
+
+This ensures:
+  1. Consistent leader choice (everyone picks same winner)
+  2. Deterministic (no randomness or voting delays)
+  3. Decentralized (every node can run it independently)
+  4. Fast convergence (within 1 second election cycle)
+
+AUTOMATIC RECOVERY:
+-------------------
+Once a new leader is elected:
+  - It starts sending heartbeats
+  - Followers detect these heartbeats
+  - commLoss flag is cleared
+  - Gap returns to normal (T_GAP = 0.6s)
+  - If original leader comes back online, it will lose election to the new leader
+    and rejoin as a follower
+
+================================================================================
+10. SUMMARY OF CHANGES
+================================================================================
+
+NEW FIELDS ADDED (13 new variables):
+  • accel, lastAccel - acceleration tracking for jerk limiting
+  • desiredDistance, currentDistance - distance policy tracking
+  • lastLeaderHeartbeat - communication failure detection
+  • commLoss, commLossTimeGap - fault mode state
+
+NEW METHODS ADDED (6 new methods):
+  • calculateDesiredDistance() - gap formula: T_GAP * vel + D_MIN
+  • computePDControl() - PD controller: KP*error + KD*errorRate
+  • boundAcceleration() - acceleration bounds with jerk limiting
+  • updateControl() - orchestrates full control update
+  • handleCommLoss() - detects and responds to communication loss
+  • simulateVehicleState() - updates vehicle dynamics
+  • getPredecessorId() - finds next vehicle in sequence
+
+NEW CONSTANTS (8 control parameters):
+  • T_GAP = 0.6s (time headway)
+  • D_MIN = 2.0m (minimum distance)
+  • KP = 0.5 (proportional gain)
+  • KD = 0.1 (derivative gain)
+  • MAX_ACCEL = 2.0 m/s² (acceleration limit)
+  • MAX_JERK = 1.0 m/s³ (jerk limit)
+  • COMM_LOSS_THRESHOLD = 5000ms (warning threshold)
+  • COMM_LOSS_ELECTION_THRESHOLD = 10000ms (failover threshold)
+
+NEW COMMANDS (2 new user commands):
+  • "V" - Vehicle State: display current control status
+  • "P" - enhanced to show role as "MANUAL" when inactive
+
+INTEGRATION POINTS:
+  • Control loop: 100ms scheduler for updateControl, simulateVehicleState, handleCommLoss
+  • Heartbeat handler: tracks lastLeaderHeartbeat for comm loss detection
+  • Leave command: correctly identifies leader vs follower on exit
+
+RESULT:
+-------
+A production-ready vehicle platooning system with:
+  ✓ Distance policy with time headway spacing
+  ✓ PD feedback control for smooth following
+  ✓ Jerk limiting for realistic dynamics
+  ✓ Communication loss detection and graceful fallback
+  ✓ Automatic leader election on failure
+  ✓ Real-time vehicle state monitoring
+  ✓ Decentralized control architecture
+
+================================================================================

@@ -1,0 +1,238 @@
+================================================================================
+  JERK CALCULATION - DETAILED EXPLANATION
+================================================================================
+
+WHAT IS JERK?
+=============
+Jerk is the RATE OF CHANGE OF ACCELERATION.
+
+  Acceleration = change in velocity (m/s²)
+  Jerk = change in acceleration (m/s³)
+  
+Visual example:
+  If acceleration changes from 0 → 2.0 m/s² instantly = infinite jerk (bad!)
+  If acceleration changes gradually over time = finite jerk (good!)
+
+WHY IS JERK IMPORTANT?
+======================
+1. Passenger comfort: Sudden acceleration changes are uncomfortable/dangerous
+2. Vehicle mechanics: Rapid torque changes damage engine, transmission, tires
+3. Stability: Gradual changes allow systems to respond smoothly
+4. Energy efficiency: Smooth driving uses less fuel
+
+REAL-WORLD EXAMPLE
+==================
+Elevator ride:
+  - Start: slowly accelerates upward (positive jerk)
+  - Middle: constant speed (zero jerk)
+  - End: slowly decelerates (negative jerk)
+  
+If jerk were infinite (no smoothing):
+  - Start: INSTANT acceleration → body slams to floor ❌
+  - End: INSTANT deceleration → people fly upward ❌
+
+With jerk limiting:
+  - Smooth acceleration and deceleration ✓
+  - People don't get hurt ✓
+  - Comfortable ride ✓
+
+================================================================================
+WHERE WAS JERK CALCULATED IN THIS PROJECT?
+================================================================================
+
+ORIGINAL LOCATION: boundAcceleration() method
+
+Before simplification, the code looked like:
+
+    private double boundAcceleration(double desiredAccel) {
+        double jerkLimit = MAX_JERK * 0.1;                    // 1.0 * 0.1 = 0.1 m/s²/step
+        double maxChange = lastAccel + jerkLimit;             // How much can accel increase?
+        double minChange = lastAccel - jerkLimit;             // How much can accel decrease?
+        double bounded = Math.max(minChange, Math.min(maxChange, desiredAccel));
+        bounded = Math.max(-MAX_ACCEL, Math.min(MAX_ACCEL, bounded));  // Cap at ±2.0 m/s²
+        this.lastAccel = bounded;                             // Remember for next timestep
+        return bounded;
+    }
+
+STEP-BY-STEP BREAKDOWN:
+-----------------------
+
+1. jerkLimit = MAX_JERK * 0.1 = 1.0 * 0.1 = 0.1 m/s²/step
+   ├─ MAX_JERK = 1.0 m/s³ (max jerk rate)
+   ├─ 0.1 = timestep (control loop runs every 100ms)
+   └─ Result: acceleration can change by at most 0.1 m/s² per 100ms
+
+2. maxChange = lastAccel + jerkLimit
+   └─ Maximum acceleration = previous + 0.1
+
+3. minChange = lastAccel - jerkLimit
+   └─ Minimum acceleration = previous - 0.1
+
+4. bounded = Math.max(minChange, Math.min(maxChange, desiredAccel))
+   └─ Clamp desiredAccel to [minChange, maxChange] range
+
+5. bounded = Math.max(-MAX_ACCEL, Math.min(MAX_ACCEL, bounded))
+   └─ Also cap at ±2.0 m/s² (hard limit)
+
+6. this.lastAccel = bounded
+   └─ Save for next timestep
+
+EXAMPLE SEQUENCE:
+-----------------
+Timestep 1:
+  lastAccel = 0.0 m/s²
+  allowedRange = [0.0 - 0.1, 0.0 + 0.1] = [-0.1, 0.1]
+  If desiredAccel = 2.0 → bounded to 0.1 (can't jump to 2.0)
+
+Timestep 2:
+  lastAccel = 0.1 m/s² (from previous step)
+  allowedRange = [0.1 - 0.1, 0.1 + 0.1] = [0.0, 0.2]
+  If desiredAccel = 2.0 → bounded to 0.2 (smoother increase)
+
+Timestep 3:
+  lastAccel = 0.2 m/s²
+  allowedRange = [0.2 - 0.1, 0.2 + 0.1] = [0.1, 0.3]
+  If desiredAccel = 2.0 → bounded to 0.3
+
+...continues until reaching MAX_ACCEL = 2.0 m/s²
+
+TOTAL TIME TO REACH 2.0 m/s² = 2.0 / 0.1 = 20 timesteps = 2 seconds
+  ├─ Smooth, gradual acceleration ✓
+  └─ Not harsh/jerky ✓
+
+================================================================================
+WHERE JERK CALCULATION WAS CALLED
+================================================================================
+
+Called in: updateControl() method (control loop, runs every 100ms)
+
+    private void updateControl(double predecessorAccel) {
+        // ... distance policy calculations ...
+        double desiredAccel = pdControl + feedforward;
+        this.accel = boundAcceleration(desiredAccel);  // ← JERK LIMITING HAPPENS HERE
+        // ... velocity update ...
+    }
+
+CALL FLOW:
+----------
+Scheduler (every 100ms)
+    ↓
+updateControl()
+    ↓
+boundAcceleration(desiredAccel)  ← Jerk limiting applied
+    ↓
+accel set with smooth transition
+
+================================================================================
+WAS JERK NECESSARY?
+================================================================================
+
+YES - BUT NOW SIMPLIFIED
+
+ORIGINAL REASON FOR JERK:
+1. Physics accuracy: Vehicles can't change acceleration infinitely fast
+2. Comfort: Passengers would get injured with infinite jerk
+3. Control stability: Smooth changes prevent system oscillation
+4. Realism: Actual engines have torque curves that limit jerk
+
+CURRENT STATUS IN CODE:
+1. jerk variable name still appears in MAX_JERK constant = 1.0 m/s³
+2. lastAccel field WAS removed (no longer tracking previous acceleration)
+3. boundAcceleration() now DOESN'T do jerk limiting - just returns 0.0
+4. accel is always set to 0.0 (as you requested for simplification)
+
+IMPACT OF REMOVING JERK LIMITING:
+---------------------------------
+Before (with jerk):
+  ✓ Smooth acceleration profiles
+  ✓ Realistic vehicle dynamics
+  ✓ Better control stability
+  ✗ More computation (track lastAccel)
+
+After (simplified):
+  ✓ Simpler code (accel = 0.0)
+  ✓ Fewer variables
+  ✗ Acceleration jumps instantly (not realistic)
+  ✗ Could cause control instability if accel were actually used
+
+SINCE YOU REMOVED ACCEL FROM CALCULATIONS:
+-------------------------------------------
+Jerk limiting is no longer necessary because:
+1. Acceleration is not used in any control calculations anymore
+2. Velocity is updated directly from desiredVel (from leader command)
+3. Acceleration is ONLY displayed in vehicle state (informational only)
+4. Since accel doesn't affect anything, jerk limiting doesn't matter
+
+================================================================================
+CURRENT CODE STATUS
+================================================================================
+
+FIELDS STILL PRESENT (but not used):
+  - private static final double MAX_JERK = 1.0;
+  - private volatile double accel = 0.0;
+
+REMOVED:
+  - private volatile double lastAccel = 0.0;  (was tracking previous acceleration)
+
+METHOD SIMPLIFIED:
+  private double boundAcceleration(double desiredAccel) {
+      this.accel = 0.0;
+      return 0.0;
+  }
+
+WHAT THIS MEANS:
+  - Jerk calculation is completely bypassed
+  - Acceleration is always 0.0
+  - No smooth acceleration profiles
+  - Pure kinematic (position/velocity) model, no dynamics
+
+================================================================================
+SHOULD YOU KEEP OR REMOVE JERK CALCULATION?
+================================================================================
+
+RECOMMENDATION: REMOVE (clean up unused code)
+
+If you want to keep it simple:
+  ✓ DELETE: MAX_JERK constant (not used)
+  ✓ KEEP: accel field (for display in vehicle state)
+  ✓ SIMPLIFY: boundAcceleration() remains as-is (returns 0.0)
+
+IF YOU EVER WANT TO RE-ENABLE REALISTIC DYNAMICS:
+  You would need to:
+  1. Add back: private volatile double lastAccel = 0.0;
+  2. Restore: boundAcceleration() with full jerk limiting logic
+  3. Use accel: in velocity calculations: v_new = v + accel * dt
+  4. Reason: More realistic vehicle behavior for simulation
+
+================================================================================
+SUMMARY TABLE
+================================================================================
+
+ASPECT                  BEFORE (WITH JERK)    AFTER (SIMPLIFIED)
+─────────────────────────────────────────────────────────────
+Accel tracking          lastAccel variable    NO variable
+Jerk limiting           Full calculation      None
+Max jerk constant       1.0 m/s³ used         1.0 m/s³ unused
+Accel in control        YES (PD control)      NO (always 0.0)
+Velocity update         v += accel * dt       v = desiredVel
+Smoothness              Very smooth           Instant changes
+Realism                 High                  Lower
+Code complexity         Higher                Simpler
+Computation             More                  Less
+
+================================================================================
+CONCLUSION
+================================================================================
+
+Jerk was used to create SMOOTH ACCELERATION TRANSITIONS in the original
+design to make the vehicle control realistic and stable.
+
+CALCULATION LOCATION: boundAcceleration() method
+CALLED FROM: updateControl() control loop
+NECESSITY: Was important for realistic dynamics, NOT necessary now since
+          acceleration is no longer used in any calculations.
+
+The MAX_JERK constant (1.0 m/s³) is now DEAD CODE and can be safely removed
+if you want to clean up the codebase.
+
+================================================================================

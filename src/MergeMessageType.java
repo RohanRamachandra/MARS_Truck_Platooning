@@ -1,0 +1,10 @@
+
+public enum MergeMessageType {
+	MERGE_JOIN_REQ,
+    MERGE_SLOT_ASSIGN,
+    //MERGE_SPEED_ADJUST,
+    MERGE_PREPARE,
+    MERGE_COMMIT,
+    MERGE_ABORT
+
+}

@@ -1,0 +1,26 @@
+# Java build artifacts
+/bin/
+*.class
+
+# Eclipse / IDE files
+*.classpath
+*.project
+.settings/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# IntelliJ
+.idea/
+
+# Gradle
+.gradle/
+
+# VS Code
+.vscode/

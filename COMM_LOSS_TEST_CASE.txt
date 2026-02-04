@@ -1,0 +1,59 @@
+Test Case: Communication Loss (Scenario E)
+
+Purpose:
+- Exercise CommManager and reliability layer under intermittent packet loss.
+
+Environment:
+- Two local nodes (Leader Alpha: id=1 port=8001, Follower Beta: id=2 port=8002)
+
+Steps (manual):
+1) Start Leader (terminal A):
+   cd C:\Users\HP\eclipse-workspace\MARS_Truck_Platooning\MARS_Truck_Platooning
+   java -cp bin TruckNode 1 8001
+
+2) Start Follower (terminal B):
+   java -cp bin TruckNode 2 8002
+
+3) Verify normal behavior:
+   - In follower terminal, run: P (prints role and leader)
+   - Run: CM (shows CommManager state = NORMAL)
+   - In leader terminal: S 22.0 (set speed) or use leader console to change speed
+
+4) Simulate intermittent loss on follower:
+   - In follower terminal: LOSS 0.5
+   - Expected: Within ~5s you will see: [COMM] LOSS_DETECT: Node 2 entering DEGRADED mode
+   - Check CM: dropped packets and state=DEGRADED
+
+5) Test reliable commands under loss:
+   - In leader terminal: use broadcastSpeed/gap or type S/G commands
+   - Reliable CRIT messages will be sent with ACKs and retried up to 3 times
+   - Expect either successful application (ACK received) or retries logged
+
+6) Prolonged loss and election:
+   - Maintain high loss (e.g., LOSS 0.9) for >10s.
+   - Expected: [COMM] PROLONGED_LOSS message and the election callback triggers: leadership may change.
+
+7) Recovery:
+   - In follower: LOSS 0
+   - Expected: [COMM] LOSS_RECOVERY and CM shows state=NORMAL; totalDegradedMs reports degradation duration
+
+Automated test script (quick):
+- Run the automated test provided in src/TestCommLoss.java which shortens thresholds for testing.
+- Compile and run:
+  javac -d bin src\*.java
+  java -cp bin TestCommLoss
+
+Notes:
+- You can tune CommManager thresholds via system properties:
+  -Dcomm.shortMs=<ms> -Dcomm.longMs=<ms> -Dcomm.extraGap=<seconds>
+
+- Reliable critical messages use CRIT|<seq>|<from>|<payload> and expect an ACK|<seq>|<from> back.
+- The LOSS command simulates inbound packet drops only on the node receiving the LOSS command.
+
+Expected console outputs:
+- [COMM] LOSS_DETECT: Node 2 entering DEGRADED mode ...
+- [COMM] PROLONGED_LOSS: Node 2 has prolonged leader heartbeat absence ...
+- [COMM] LOSS_RECOVERY: Node 2 recovered to NORMAL
+- CRIT/ACK exchanges for reliable commands may show retries if packets are dropped.
+
+End of test case.

@@ -1,0 +1,56 @@
+MARS TRUCK PLATOONING - CONTROL SYSTEM TEST PLAN
+================================================
+
+Objective: Demonstrate the implemented control system with:
+1. Distance policy (T_GAP=0.6s, D_MIN=2.0m)
+2. PD controller with feedforward
+3. Communication loss handling
+4. Vehicle state tracking
+
+Test Commands:
+--------------
+
+STEP 1: Check initial platoon state (on Alpha)
+  Command: P
+  Expected: Show all 4 nodes in platoon, Alpha as leader
+
+STEP 2: Check vehicle state (on Beta - follower)
+  Command: V
+  Expected: Show velocity, acceleration, distances, control status
+
+STEP 3: Set speed (on Alpha - leader only)
+  Command: S 10
+  Expected: Alpha increases speed to 10 m/s
+
+STEP 4: Wait for control updates
+  Action: Wait 2 seconds for Beta's control loop to run
+  Expected: Beta increases velocity toward 10 m/s via PD control
+
+STEP 5: Check vehicle state again (on Beta)
+  Command: V
+  Expected: Velocity increased, desired distance = 0.6*v + 2.0, current distance tracking
+
+STEP 6: Set gap (on Alpha)
+  Command: G 1.0
+  Expected: Time gap increases to 1.0 seconds
+
+STEP 7: Check adjusted desired distance (on Beta)
+  Command: V
+  Expected: Desired distance now = 1.0*v + 2.0
+
+STEP 8: Communication loss scenario
+  Action: Leave Alpha network (kill Alpha node)
+  Expected: Beta detects comm loss after 5 seconds, increases gap to 0.6+2.0=2.6s
+  Expected: After 10 seconds, Beta triggers Bully election, elects new leader
+
+STEP 9: Rejoin after recovery
+  Action: Restart Alpha
+  Expected: Alpha rejoins, communication restored, gap returns to normal
+
+Key Metrics to Monitor:
+-----------------------
+- Velocity tracking toward leader command
+- Distance tracking toward desired gap
+- Acceleration bounding (max 2.0 m/s², jerk max 1.0 m/s³)
+- Communication loss detection at 5s warning, 10s election threshold
+- Graceful fallback with increased safety gap
